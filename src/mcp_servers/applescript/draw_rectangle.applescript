@@ -3,7 +3,6 @@ on run argv
     set yVal to (item 2 of argv) as integer
     set wVal to (item 3 of argv) as integer
     set hVal to (item 4 of argv) as integer
-
     tell application "Keynote"
         if (count of documents) is 0 then error "No open Keynote document"
         tell document 1
@@ -16,10 +15,9 @@ on run argv
                 try
                     set shape type of newShape to rectangle
                 end try
-                set theID to id of newShape
+                set theIndex to count of shapes
             end tell
         end tell
     end tell
-
-    return theID as string
+    return theIndex as string
 end run
