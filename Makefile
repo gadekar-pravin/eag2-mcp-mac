@@ -15,6 +15,8 @@ run-server-dev:
 run-gmail-server-dev:
 	. .venv/bin/activate && python src/gmail_bonus/mcp_server_gmail.py dev
 
+run-gmail-mcp:
+	. .venv/bin/activate && python scripts/send_email_via_mcp.py
 
 lint:
 	. .venv/bin/activate && ruff check .

@@ -606,7 +606,7 @@ DEFAULT_QUERY = "Create a rectangle in Keynote slide 1 and write this exact text
 **Optional Acceptance**
 
 * `screenshot_slide` saves a PNG to `${SCREENSHOT_PATH}`.
-* Gmail bonus: `send_email(to, subject, body)` demonstration.
+* Gmail bonus: `send_email(to, subject, body, body_html?)` demonstration.
 
 ---
 
@@ -645,8 +645,8 @@ test:
 ## 13. Bonus: Gmail MCP (Optional)
 
 **File:** `src/gmail_bonus/mcp_server_gmail.py`
-**Tool:** `send_email(to: str, subject: str, body: str) -> str`
-**Behavior:** Uses Gmail API / OAuth to send email, returns:
+**Tool:** `send_email(to: str, subject: str, body: str, body_html?: str) -> str`
+**Behavior:** Uses Gmail API / OAuth to send email, returning plaintext with an optional HTML alternative:
 
 * `EMAIL_SENT: to=<addr>, id=<gmail_message_id>`
 * `ERROR: <message>`

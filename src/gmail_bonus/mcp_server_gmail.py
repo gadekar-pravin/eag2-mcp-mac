@@ -84,7 +84,13 @@ def _build_gmail_service():
     return service
 
 
-def _encode_message(to_addr: str, subject: str, body: str, from_addr: str | None) -> str:
+def _encode_message(
+    to_addr: str,
+    subject: str,
+    body: str,
+    from_addr: str | None,
+    body_html: str | None = None,
+) -> str:
     msg = EmailMessage()
     msg["To"] = to_addr
     if from_addr:
@@ -92,19 +98,28 @@ def _encode_message(to_addr: str, subject: str, body: str, from_addr: str | None
         msg["From"] = from_addr
     msg["Subject"] = subject
     msg.set_content(body)
+    if body_html:
+        msg.add_alternative(body_html, subtype="html")
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
 
 # ---- Tool: send_email -------------------------------------------------------
 @mcp.tool()
-def send_email(to: str, subject: str, body: str) -> str:
-    """Send a plaintext email using the authorized Gmail account.
+def send_email(to: str, subject: str, body: str, body_html: str | None = None) -> str:
+    """Send an email using the authorized Gmail account.
+
+    Provides a plaintext body and, when supplied, an HTML alternative part.
 
     Returns:
       - EMAIL_SENT: to=<addr>, id=<gmail_message_id>
       - ERROR: <message>
     """
-    params = {"to": to, "subject": subject, "body_len": len(body)}
+    params = {
+        "to": to,
+        "subject": subject,
+        "body_len": len(body),
+        "body_html": bool(body_html),
+    }
     try:
         # Minimal sanity check; Gmail will still validate.
         if "@" not in (to or ""):
@@ -114,7 +129,7 @@ def send_email(to: str, subject: str, body: str) -> str:
 
         service = _build_gmail_service()
         from_env = os.getenv("GMAIL_SENDER") or None
-        raw_msg = _encode_message(to, subject, body, from_env)
+        raw_msg = _encode_message(to, subject, body, from_env, body_html=body_html)
 
         # Gmail API call
         resp = (

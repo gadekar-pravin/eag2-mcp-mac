@@ -146,10 +146,12 @@ make run-gmail-server-dev
 On first use it will open a browser for OAuth and cache the token at `GMAIL_TOKEN_PATH`.
 
 ### Tool contract
-`send_email(to: string, subject: string, body: string) -> str`
+`send_email(to: string, subject: string, body: string, body_html?: string) -> str`
 
 **Returns**
 - `EMAIL_SENT: to=<addr>, id=<gmail_message_id>`
 - `ERROR: <message>`
+
+> The optional `body_html` lets callers add a styled HTML alternative; the plain text `body` is always required.
 
 > Note: This server is independent from the Keynote server. Your client can connect to either (or both, if it launches two MCP subprocesses) and list/call the `send_email` tool like any other MCP tool.
