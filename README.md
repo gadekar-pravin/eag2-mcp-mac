@@ -1,11 +1,68 @@
 # MCP Keynote Drawing Agent (macOS)
 
-This project implements a full Model Context Protocol (MCP) workflow that allows an LLM agent to open Keynote on macOS, draw a centered rectangle on slide 1, and insert user-provided text inside that rectangle. All desktop automation happens through AppleScript tools exposed by a FastMCP server. A Gemini 2.0 Flash model drives the interaction via the `mcp` stdio client.
+This repository hosts a complete Model Context Protocol (MCP) workflow for automating Apple Keynote from an LLM agent on macOS. A Gemini 2.0 Flash client in `src/client` drives FastMCP servers that expose AppleScript tools for drawing on slides, plus an optional Gmail server for sending run summaries via email.
+
+- Keynote scenario: open Keynote, capture slide geometry, draw a centered rectangle, and drop user-provided text inside it.
+- Gmail scenario: reuse the client orchestrator to call a `send_email` tool backed by the Gmail API, hydrating the payload from the latest agent log.
+
+## Table of Contents
+- [Architecture Overview](#architecture-overview)
+- [Repository Layout](#repository-layout)
+- [Setup](#setup)
+- [macOS Permissions](#macos-permissions)
+- [Running the Workflows](#running-the-workflows)
+- [Logging and Artifacts](#logging-and-artifacts)
+- [Linting and Tests](#linting-and-tests)
+- [Configuration Reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
+- [Demo Checklist](#demo-checklist)
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    User[User CLI] --> CLI[talk2mcp.py]
+    CLI --> Gemini[Gemini 2.0 Flash]
+    Gemini --> CLI
+    CLI --> Scenario{ScenarioContext}
+    Scenario -->|keynote| KeynoteServer[mcp_server_keynote.py]
+    Scenario -->|gmail| GmailServer[mcp_server_gmail.py]
+    KeynoteServer --> Runner[applescript_runner.py]
+    Runner --> Scripts[AppleScript tools]
+    Scripts --> Keynote[Keynote.app]
+    GmailServer --> GmailAPI[Gmail API]
+    CLI --> Logs[logs/agent.log]
+    Logs --> EmailPayload[email_payload.py]
+```
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as talk2mcp.py
+    participant L as Gemini Model
+    participant S as Keynote MCP
+    participant R as run_applescript_file
+    participant K as Keynote
+
+    U->>C: make run-client / --query
+    C->>S: list_tools()
+    C->>L: System prompt + user turn
+    L-->>C: FUNCTION_CALL line
+    C->>S: call_tool(name, args)
+    S->>R: execute AppleScript
+    R->>K: Automate slide
+    R-->>S: Raw result
+    S-->>C: Tool return string
+    C-->>L: TOOL_RESULT message
+    L-->>C: FINAL_ANSWER
+    C-->>U: Logs + exit
+```
 
 ## Repository Layout
 
 ```
 eag2-mcp-mac/
+├── AGENTS.md
 ├── Makefile
 ├── README.md
 ├── requirements.txt
@@ -15,26 +72,30 @@ eag2-mcp-mac/
 ├── logs/
 ├── scripts/
 │   ├── dev_run_client.sh
-│   └── record_demo_checklist.md
+│   ├── record_demo_checklist.md
+│   └── send_email_via_mcp.py
 ├── src/
+│   ├── __init__.py
 │   ├── client/
 │   │   ├── __init__.py
+│   │   ├── email_payload.py
 │   │   ├── prompts.py
+│   │   ├── prompts_gmail.py
 │   │   └── talk2mcp.py
 │   ├── gmail_bonus/
-│   │   └── __init__.py
+│   │   ├── __init__.py
+│   │   └── mcp_server_gmail.py
 │   └── mcp_servers/
 │       ├── __init__.py
 │       ├── mcp_server_keynote.py
-│       ├── applescript/
-│       │   ├── add_text_in_keynote.applescript
-│       │   ├── draw_rectangle.applescript
-│       │   ├── export_slide_png.applescript
-│       │   ├── get_slide_size.applescript
-│       │   └── open_keynote.applescript
-│       └── utils/
-│           ├── __init__.py
-│           └── applescript_runner.py
+│       ├── utils/
+│       │   └── applescript_runner.py
+│       └── applescript/
+│           ├── add_text_in_keynote.applescript
+│           ├── draw_rectangle.applescript
+│           ├── export_slide_png.applescript
+│           ├── get_slide_size.applescript
+│           └── open_keynote.applescript
 └── tests/
     ├── conftest.py
     ├── test_applescript_smoke.py
@@ -42,116 +103,113 @@ eag2-mcp-mac/
     └── test_server_contracts.py
 ```
 
-## Prerequisites
-
-- macOS with Apple Keynote installed (tested on Apple Silicon).
-- Python 3.11+
-- Gemini 2.0 Flash API access (`google-genai`).
-- Accessibility + Automation privileges for the terminal/IDE that launches the Python scripts.
-
 ## Setup
 
-1. Clone the repository and navigate into it.
-2. Copy the example environment file and set your Gemini key:
+1. Install Python 3.11+ and ensure Keynote is available on macOS (Apple Silicon tested).
+2. Clone the repository and change into the project root.
+3. Copy the environment template and add your Gemini key:
    ```bash
    cp .env.example .env
-   # edit .env and place your GEMINI_API_KEY
+   # populate GEMINI_API_KEY (and optional Gmail variables)
    ```
-3. Install dependencies into a virtual environment:
+4. Create the virtual environment and install dependencies:
    ```bash
    make setup
    ```
 
 ## macOS Permissions
 
-AppleScript automation requires explicit permission:
+AppleScript automation requires Accessibility and Automation consent:
 
-1. Open **System Settings → Privacy & Security → Accessibility** and add Terminal (or your IDE) and `Python.app` from the project’s virtual environment (`.venv/bin/python`).
-2. Open **System Settings → Privacy & Security → Automation** and ensure the terminal/IDE is allowed to control Keynote.
-3. Launch Keynote once manually so it can request approval the first time automation runs.
+1. Open **System Settings → Privacy & Security → Accessibility** and allow Terminal (or your IDE) plus `.venv/bin/python`.
+2. Open **System Settings → Privacy & Security → Automation** and grant the same host permission to control Keynote.
+3. Launch Keynote once manually to accept the initial permission prompts before running the agent.
 
-## Running the Agent
+## Running the Workflows
 
-1. Ensure Keynote is closed or has a document ready (the server will reuse document 1 or create a new one based on `KEYNOTE_DOCUMENT_MODE`).
-2. Start the client orchestrator:
-   ```bash
-   make run-client
-   # or: scripts/dev_run_client.sh --query "Custom instruction"
-   ```
-3. Watch the terminal logs (also written to `logs/agent.log`) to confirm the sequence:
-   - `open_keynote`
-   - optional `get_slide_size`
-   - `draw_rectangle`
-   - `add_text_in_keynote`
-   - `FINAL_ANSWER: [done]`
-4. The rectangle and text should appear on Keynote slide 1 without manual intervention after `FINAL_ANSWER`.
+### Keynote scenario
 
-### Logging
+- Default run (Gemini → Keynote):
+  ```bash
+  make run-client
+  ```
+- Pass a custom prompt:
+  ```bash
+  python src/client/talk2mcp.py --query "Write 'Hello MCP' inside a centered box."
+  ```
+- Iteratively debug the server (keeps stdout verbose):
+  ```bash
+  make run-server-dev
+  ```
+- Quick local loop with additional CLI options:
+  ```bash
+  scripts/dev_run_client.sh --scenario keynote --query "..."
+  ```
 
-- All client-side I/O is streamed to `logs/agent.log` with UTC timestamps and a per-run identifier.
-- The server logs each tool invocation, including parameters, raw AppleScript output, and the final return string.
+The client lists tools from `mcp_server_keynote.py`, feeds their schema into the Gemini system prompt, and loops on FUNCTION_CALL / TOOL_RESULT pairs until `FINAL_ANSWER: [done]`.
 
-### Optional Screenshot Tool
+### Gmail scenario
 
-The `screenshot_slide` tool exports slide 1 as a PNG. Provide a target path when instructing the agent, or set `SCREENSHOT_PATH` in `.env` and include that in the conversation.
-
-## Tests
-
-Run the automated test suite:
+The same orchestrator can call the Gmail MCP server using the latest agent log.
 
 ```bash
-make test
+make run-gmail-client
+# or: python src/client/talk2mcp.py --scenario gmail --query "optional instructions"
 ```
 
-Included coverage:
+The helper script `scripts/send_email_via_mcp.py` is available for quick manual sends once credentials are configured.
 
-- `test_protocol.py` validates parsing of the strict FUNCTION_CALL/FINAL_ANSWER grammar.
-- `test_server_contracts.py` patches the AppleScript runner to verify tool responses and server state management.
-- `test_applescript_smoke.py` confirms the AppleScript files exist (skipped if Keynote automation is unavailable).
+```mermaid
+flowchart LR
+    Logs[logs/agent.log] --> Builder[email_payload.py]
+    Builder --> Context[ScenarioContext (gmail)]
+    Context --> send_email
+    send_email --> GmailAPI[Gmail API]
+    GmailAPI --> Recipient[Recipient Inbox]
+```
+
+Ensure you have `gmail_credentials.json` (OAuth desktop client) and run the flow once to create `gmail_token.json`. The first invocation will open a browser window for OAuth consent.
+
+## Logging and Artifacts
+
+- All orchestrator output is streamed to `logs/agent.log` with run IDs and UTC timestamps.
+- The Gmail scenario reads the same log to shape plaintext and HTML bodies (see `src/client/email_payload.py`).
+- AppleScript tools write the rendered slide to Keynote; optional screenshots land where `SCREENSHOT_PATH` points, or where you direct the `screenshot_slide` tool.
+
+## Linting and Tests
+
+- Ruff linting:
+  ```bash
+  make lint
+  ```
+- Pytest suite:
+  ```bash
+  make test
+  ```
+  - `tests/test_protocol.py` verifies strict FUNCTION_CALL / FINAL_ANSWER parsing.
+  - `tests/test_server_contracts.py` patches the AppleScript runner and validates tool responses.
+  - `tests/test_applescript_smoke.py` confirms AppleScript availability (skips when Keynote automation is unavailable).
+
+## Configuration Reference
+
+Environment variables (optional entries inherit defaults):
+
+- `GEMINI_API_KEY` – required to call Gemini.
+- `KEYNOTE_THEME` – Keynote theme name (default `White`).
+- `KEYNOTE_DOCUMENT_MODE` – `reuse_or_create` (default) or `always_new`.
+- `SCREENSHOT_PATH` – default path for the `screenshot_slide` tool.
+- `LOG_LEVEL` – adjust server logging verbosity.
+- `GMAIL_CREDENTIALS_PATH` / `GMAIL_TOKEN_PATH` – override OAuth file locations.
+- `GMAIL_SENDER` – verified alias to use for the Gmail `From` header.
 
 ## Troubleshooting
 
-- **Keynote not opening / permissions errors:** Re-check Accessibility & Automation settings. macOS may need to be restarted after toggling them.
-- **AppleScript failures:** Review the terminal output; the server surfaces the raw error message from `osascript` in the return string and logs.
-- **Rectangle not centered:** Ensure the slide dimensions are retrieved (`open_keynote` caches them) before `draw_rectangle` runs.
-- **Pipes in text:** The agent replaces `|` with `¦` before calling `add_text_in_keynote`. The server converts it back automatically.
-- **Gemini quota or auth issues:** Confirm `GEMINI_API_KEY` is valid and not rate limited.
+- **Keynote fails to open**: Re-check Accessibility/Automation permissions or restart macOS after toggling them.
+- **AppleScript errors**: Inspect server logs; the FastMCP server surfaces `osascript` output in the returned string.
+- **Rectangle not centered**: Ensure `open_keynote` runs first so dimensions are cached before `draw_rectangle`.
+- **Gmail OAuth issues**: Delete `gmail_token.json` and re-run the Gmail scenario to restart the OAuth flow.
+- **Gemini auth errors**: Verify `GEMINI_API_KEY` in `.env` and confirm quota availability.
 
-## Demo Recording
+## Demo Checklist
 
-Use `scripts/record_demo_checklist.md` as a quick reminder when producing the acceptance video. Capture both the CLI logs and the Keynote window in a single take.
-
----
-
-# Bonus: Gmail MCP Server (`send_email`)
-
-This optional MCP server lets an agent send email via Gmail using OAuth.
-
-### Setup
-1) Enable the **Gmail API** in Google Cloud Console for your project.
-2) Create an **OAuth Client ID → Desktop app** and download the JSON.
-3) Save it as `gmail_credentials.json` in the project root (or anywhere) and set:
-   ```bash
-   cp .env.example .env
-   # In .env:
-   GMAIL_CREDENTIALS_PATH=./gmail_credentials.json
-   GMAIL_TOKEN_PATH=./gmail_token.json
-   ```
-4) Install deps (already covered by `make setup`).
-
-### Run the server
-```bash
-make run-gmail-server-dev
-```
-On first use it will open a browser for OAuth and cache the token at `GMAIL_TOKEN_PATH`.
-
-### Tool contract
-`send_email(to: string, subject: string, body: string, body_html?: string) -> str`
-
-**Returns**
-- `EMAIL_SENT: to=<addr>, id=<gmail_message_id>`
-- `ERROR: <message>`
-
-> The optional `body_html` lets callers add a styled HTML alternative; the plain text `body` is always required.
-
-> Note: This server is independent from the Keynote server. Your client can connect to either (or both, if it launches two MCP subprocesses) and list/call the `send_email` tool like any other MCP tool.
+Use `scripts/record_demo_checklist.md` to capture both the CLI session and the Keynote window when recording acceptance demos.
