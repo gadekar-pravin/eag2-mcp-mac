@@ -10,6 +10,12 @@ run-client:
 run-server-dev:
 	. .venv/bin/activate && python src/mcp_servers/mcp_server_keynote.py dev
 
+# Bonus: Gmail MCP server
+.PHONY: run-gmail-server-dev
+run-gmail-server-dev:
+	. .venv/bin/activate && python src/gmail_bonus/mcp_server_gmail.py dev
+
+
 lint:
 	. .venv/bin/activate && ruff check .
 

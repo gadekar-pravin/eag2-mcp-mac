@@ -6,3 +6,5 @@ __pycache__/
 .env
 logs/
 *.png
+gmail_credentials.json
+gmail_token.json

@@ -121,3 +121,35 @@ Included coverage:
 
 Use `scripts/record_demo_checklist.md` as a quick reminder when producing the acceptance video. Capture both the CLI logs and the Keynote window in a single take.
 
+---
+
+# Bonus: Gmail MCP Server (`send_email`)
+
+This optional MCP server lets an agent send email via Gmail using OAuth.
+
+### Setup
+1) Enable the **Gmail API** in Google Cloud Console for your project.
+2) Create an **OAuth Client ID → Desktop app** and download the JSON.
+3) Save it as `gmail_credentials.json` in the project root (or anywhere) and set:
+   ```bash
+   cp .env.example .env
+   # In .env:
+   GMAIL_CREDENTIALS_PATH=./gmail_credentials.json
+   GMAIL_TOKEN_PATH=./gmail_token.json
+   ```
+4) Install deps (already covered by `make setup`).
+
+### Run the server
+```bash
+make run-gmail-server-dev
+```
+On first use it will open a browser for OAuth and cache the token at `GMAIL_TOKEN_PATH`.
+
+### Tool contract
+`send_email(to: string, subject: string, body: string) -> str`
+
+**Returns**
+- `EMAIL_SENT: to=<addr>, id=<gmail_message_id>`
+- `ERROR: <message>`
+
+> Note: This server is independent from the Keynote server. Your client can connect to either (or both, if it launches two MCP subprocesses) and list/call the `send_email` tool like any other MCP tool.
