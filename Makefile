@@ -1,4 +1,4 @@
-.PHONY: setup run-client run-server-dev lint test
+.PHONY: setup run-client run-gmail-client run-server-dev lint test
 
 setup:
 	python -m venv .venv
@@ -7,13 +7,11 @@ setup:
 run-client:
 	. .venv/bin/activate && python src/client/talk2mcp.py
 
+run-gmail-client:
+	. .venv/bin/activate && python src/client/talk2mcp.py --scenario gmail
+
 run-server-dev:
 	. .venv/bin/activate && python src/mcp_servers/mcp_server_keynote.py dev
-
-# Bonus: Gmail MCP server
-.PHONY: run-gmail-server-dev
-run-gmail-server-dev:
-	. .venv/bin/activate && python src/gmail_bonus/mcp_server_gmail.py dev
 
 run-gmail-mcp:
 	. .venv/bin/activate && python scripts/send_email_via_mcp.py

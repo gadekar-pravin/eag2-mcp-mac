@@ -29,9 +29,17 @@ if __package__ is None or __package__ == "":  # pragma: no cover
     SRC_ROOT = PROJECT_ROOT / "src"
     if str(SRC_ROOT) not in sys.path:
         sys.path.insert(0, str(SRC_ROOT))
-    from client.prompts import DEFAULT_QUERY, SYSTEM_PROMPT
+    from client.email_payload import build_log_email_payload
+    from client.prompts import DEFAULT_QUERY as KEYNOTE_DEFAULT_QUERY
+    from client.prompts import SYSTEM_PROMPT as KEYNOTE_SYSTEM_PROMPT
+    from client.prompts_gmail import DEFAULT_QUERY as GMAIL_DEFAULT_QUERY
+    from client.prompts_gmail import SYSTEM_PROMPT as GMAIL_SYSTEM_PROMPT
 else:
-    from .prompts import DEFAULT_QUERY, SYSTEM_PROMPT
+    from .email_payload import build_log_email_payload
+    from .prompts import DEFAULT_QUERY as KEYNOTE_DEFAULT_QUERY
+    from .prompts import SYSTEM_PROMPT as KEYNOTE_SYSTEM_PROMPT
+    from .prompts_gmail import DEFAULT_QUERY as GMAIL_DEFAULT_QUERY
+    from .prompts_gmail import SYSTEM_PROMPT as GMAIL_SYSTEM_PROMPT
 
 
 FUNCTION_CALL_PREFIX = "FUNCTION_CALL:"
@@ -42,12 +50,47 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOGS_DIR = PROJECT_ROOT / "logs"
 LOG_FILE = LOGS_DIR / "agent.log"
 
+KEYNOTE_SERVER_SCRIPT = PROJECT_ROOT / "src" / "mcp_servers" / "mcp_server_keynote.py"
+GMAIL_SERVER_SCRIPT = PROJECT_ROOT / "src" / "gmail_bonus" / "mcp_server_gmail.py"
+VALID_SCENARIOS = ("keynote", "gmail")
+
 
 @dataclass
 class AgentDirective:
     kind: str
     name: str | None = None
     arguments: List[str] | None = None
+
+
+@dataclass
+class ScenarioContext:
+    name: str
+    server_script: Path
+    system_prompt_template: str
+    default_query: str
+    gmail_payload: Dict[str, Any] | None = None
+
+    def build_system_prompt(self, tools_description: str) -> str:
+        return self.system_prompt_template.format(tools_description=tools_description)
+
+    def prepare_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        logger: "RunLogger",
+    ) -> Dict[str, Any]:
+        if self.name == "gmail" and tool_name == "send_email":
+            if self.gmail_payload is None:
+                logger.log(
+                    "gmail_payload_missing falling back to provided arguments for send_email"
+                )
+                return arguments
+            if arguments:
+                logger.log(
+                    "gmail_payload_override ignoring agent-supplied arguments for send_email"
+                )
+            return dict(self.gmail_payload)
+        return arguments
 
 
 def parse_agent_line(line: str) -> AgentDirective:
@@ -125,6 +168,29 @@ class RunLogger:
 
     def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - convenience
         self.close()
+
+
+def _build_scenario_context(name: str) -> ScenarioContext:
+    normalized = (name or "").strip().lower()
+    if normalized == "keynote":
+        return ScenarioContext(
+            name="keynote",
+            server_script=KEYNOTE_SERVER_SCRIPT,
+            system_prompt_template=KEYNOTE_SYSTEM_PROMPT,
+            default_query=KEYNOTE_DEFAULT_QUERY,
+        )
+    if normalized == "gmail":
+        payload = build_log_email_payload()
+        return ScenarioContext(
+            name="gmail",
+            server_script=GMAIL_SERVER_SCRIPT,
+            system_prompt_template=GMAIL_SYSTEM_PROMPT,
+            default_query=GMAIL_DEFAULT_QUERY,
+            gmail_payload=payload,
+        )
+
+    valid = ", ".join(VALID_SCENARIOS)
+    raise ValueError(f"Unknown scenario '{name}'. Expected one of: {valid}")
 
 
 def _extract_schema(tool: Any) -> List[Tuple[str, str]]:
@@ -255,7 +321,12 @@ async def _call_tool(session: Any, tool_name: str, arguments: Dict[str, Any]) ->
     return str(response).strip()
 
 
-async def run_agent(query: str, max_iterations: int, model: str) -> None:
+async def run_agent(
+    query: str,
+    max_iterations: int,
+    model: str,
+    scenario: ScenarioContext,
+) -> None:
     load_dotenv()
 
     api_key = os.getenv("GEMINI_API_KEY")
@@ -264,11 +335,20 @@ async def run_agent(query: str, max_iterations: int, model: str) -> None:
 
     server_params = StdioServerParameters(
         command="python",
-        args=["-u", str(PROJECT_ROOT / "src" / "mcp_servers" / "mcp_server_keynote.py")],
+        args=["-u", str(scenario.server_script)],
     )
 
     run_id = uuid4().hex[:8]
     logger = RunLogger(run_id)
+    logger.log(f"scenario={scenario.name}")
+    if scenario.name == "gmail" and scenario.gmail_payload:
+        preview = {
+            "to": scenario.gmail_payload.get("to"),
+            "subject": scenario.gmail_payload.get("subject"),
+            "body_len": len(scenario.gmail_payload.get("body", "")),
+            "has_html": "body_html" in scenario.gmail_payload,
+        }
+        logger.log(f"gmail_payload_prepared={_serialize_for_logging(preview)}")
 
     genai_client = genai.Client(api_key=api_key)
 
@@ -280,7 +360,7 @@ async def run_agent(query: str, max_iterations: int, model: str) -> None:
                 tools_result = await session.list_tools()
                 tools = getattr(tools_result, "tools", tools_result)
                 tools_description, tool_schemas = _build_tools_description(tools)
-                system_prompt = SYSTEM_PROMPT.format(tools_description=tools_description)
+                system_prompt = scenario.build_system_prompt(tools_description)
                 logger.log(f"tools listed: {', '.join(getattr(tool, 'name', 'unknown') for tool in tools)}")
 
                 history: List[Dict[str, Any]] = []
@@ -344,6 +424,11 @@ async def run_agent(query: str, max_iterations: int, model: str) -> None:
 
                     logger.log(f"FUNCTION_CALL parsed: {tool_name}|{'|'.join(raw_args)}")
 
+                    arguments = scenario.prepare_tool_arguments(tool_name, arguments, logger)
+                    logger.log(
+                        f"tool_arguments_prepared name={tool_name} payload={_serialize_for_logging(arguments)}"
+                    )
+
                     if not hasattr(session, "call_tool"):
                         raise RuntimeError("MCP session does not support call_tool")
 
@@ -359,8 +444,14 @@ async def run_agent(query: str, max_iterations: int, model: str) -> None:
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Keynote MCP client orchestrator")
-    parser.add_argument("--query", default=DEFAULT_QUERY, help="User query to seed the run")
+    parser = argparse.ArgumentParser(description="Run the MCP client orchestrator")
+    parser.add_argument(
+        "--scenario",
+        choices=VALID_SCENARIOS,
+        default="keynote",
+        help="Which MCP scenario to run (default: keynote)",
+    )
+    parser.add_argument("--query", default=None, help="User query to seed the run")
     parser.add_argument("--max-iterations", type=int, default=8, help="Maximum agent iterations")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Gemini model to use")
     return parser.parse_args(argv)
@@ -368,7 +459,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv or sys.argv[1:])
-    asyncio.run(run_agent(args.query, args.max_iterations, args.model))
+    scenario = _build_scenario_context(args.scenario)
+    query = args.query if args.query is not None else scenario.default_query
+    if args.query is None and scenario.name == "gmail" and scenario.gmail_payload:
+        to_value = scenario.gmail_payload.get("to")
+        subject_value = scenario.gmail_payload.get("subject")
+        body_len = len(scenario.gmail_payload.get("body", ""))
+        query = (
+            f"{query} (to={to_value}, subject={subject_value}, body_characters={body_len})"
+        )
+    asyncio.run(run_agent(query, args.max_iterations, args.model, scenario))
 
 
 if __name__ == "__main__":
