@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -79,6 +80,15 @@ def _ensure_logs_dir() -> None:
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+
+
+def _serialize_for_logging(payload: Any) -> str:
+    """Serialize payload for logging, falling back to repr when JSON fails."""
+
+    try:
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str)
+    except TypeError:
+        return repr(payload)
 
 
 class RunLogger:
@@ -272,9 +282,20 @@ async def run_agent(query: str, max_iterations: int, model: str) -> None:
                     history.append({"role": "user", "parts": [{"text": next_message}]})
                     logger.log(f"iteration={iteration} user_message={next_message}")
 
+                    llm_request = {
+                        "model": model,
+                        "system_prompt": system_prompt,
+                        "contents": history,
+                    }
+                    logger.log(
+                        f"llm_request iteration={iteration} payload={_serialize_for_logging(llm_request)}"
+                    )
+
                     response = _generate_model_response(genai_client, model, history, system_prompt)
 
                     raw_text = _extract_response_text(response)
+                    sanitized_raw_text = raw_text.replace("\n", "\\n") if isinstance(raw_text, str) else raw_text
+                    logger.log(f"llm_response iteration={iteration} raw_text={sanitized_raw_text}")
                     primary_line = raw_text.splitlines()[0] if raw_text else ""
                     history.append({"role": "model", "parts": [{"text": primary_line}]})
                     logger.log(f"model_response={primary_line}")
