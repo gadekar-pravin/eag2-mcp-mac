@@ -91,7 +91,13 @@ def open_keynote() -> str:
         else:
             result = f"KEYNOTE_READY: slide=1, slide_width={width}, slide_height={height}"
     except (AppleScriptError, ValueError) as exc:
-        result = f"ERROR: {exc}"
+        # Fallback to the cached dimensions from open_keynote, if present
+        cached = SERVER_STATE.get("last_slide_dims") or {}
+        width, height = cached.get("width"), cached.get("height")
+        if isinstance(width, int) and isinstance(height, int) and width and height:
+            result = f"SLIDE_SIZE: width={width}, height={height}"
+        else:
+            result = f"ERROR: {exc}"
     except Exception as exc:  # pragma: no cover - safeguard
         result = f"ERROR: {exc}"
     finally:

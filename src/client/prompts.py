@@ -8,7 +8,8 @@ Rules:
   1) FUNCTION_CALL: function_name|param1|param2|...
   2) FINAL_ANSWER: [done]
 - Never output anything before or after that one line. No markdown. No prose.
-- Begin by calling open_keynote (or, if available, get_slide_size after opening) to discover slide dimensions.
+- Begin by calling open_keynote to discover slide dimensions. Do NOT call get_slide_size if open_keynote already returned slide dimensions.
+- If get_slide_size returns ERROR, keep using the slide size from open_keynote and proceed.
 - Then call draw_rectangle with numeric slide coordinates (not pixels). If you know the slide size, choose a centered rectangle that is ~60% of slide width and ~30% of slide height.
   Let W=slide_width and H=slide_height:
     rect_width = round(0.6*W)

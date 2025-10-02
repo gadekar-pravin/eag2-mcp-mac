@@ -15,7 +15,8 @@ from dotenv import load_dotenv
 from google import genai
 
 try:  # pragma: no cover - handled at runtime
-    from mcp.client.stdio import StdioClient, StdioServerParameters
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
 except ImportError as exc:  # pragma: no cover - guidance for setup
     raise RuntimeError(
         "The 'mcp' package is required. Install dependencies with `pip install -r requirements.txt`."
@@ -173,6 +174,54 @@ def _extract_response_text(response: Any) -> str:
     return str(response).strip()
 
 
+def _generate_model_response(
+    genai_client: Any,
+    model: str,
+    contents: Sequence[Dict[str, Any]],
+    system_prompt: str,
+) -> Any:
+    """Dispatch to whichever google-genai response API is available."""
+
+    responses_api = getattr(genai_client, "responses", None)
+    if responses_api is not None:
+        try:
+            return responses_api.create(
+                model=model,
+                contents=contents,
+                system_instruction=system_prompt,
+                generation_config={"response_mime_type": "text/plain"},
+            )
+        except TypeError:
+            return responses_api.create(
+                model=model,
+                contents=contents,
+                system_instruction=system_prompt,
+                config={"response_mime_type": "text/plain"},
+            )
+
+    models_api = getattr(genai_client, "models", None)
+    if models_api is None:
+        raise RuntimeError("google-genai client is missing both responses and models APIs")
+
+    config_payload: Dict[str, Any] = {
+        "system_instruction": system_prompt,
+        "response_mime_type": "text/plain",
+    }
+
+    try:
+        return models_api.generate_content(
+            model=model,
+            contents=contents,
+            config=config_payload,
+        )
+    except TypeError:
+        return models_api.generate_content(
+            model=model,
+            contents=contents,
+            generation_config=config_payload,
+        )
+
+
 async def _call_tool(session: Any, tool_name: str, arguments: Dict[str, Any]) -> str:
     response = await session.call_tool(tool_name, arguments)
     # The MCP client returns an object with ``content``; fall back to str if needed.
@@ -206,84 +255,76 @@ async def run_agent(query: str, max_iterations: int, model: str) -> None:
     genai_client = genai.Client(api_key=api_key)
 
     try:
-        async with StdioClient(server_params=server_params) as session:
-            tools_result = await session.list_tools()
-            tools = getattr(tools_result, "tools", tools_result)
-            tools_description, tool_schemas = _build_tools_description(tools)
-            system_prompt = SYSTEM_PROMPT.format(tools_description=tools_description)
-            logger.log(f"tools listed: {', '.join(getattr(tool, 'name', 'unknown') for tool in tools)}")
+        async with stdio_client(server_params) as (read_stream, write_stream):
+            async with ClientSession(read_stream=read_stream, write_stream=write_stream) as session:
+                await session.initialize()
 
-            history: List[Dict[str, Any]] = []
-            next_message = query
+                tools_result = await session.list_tools()
+                tools = getattr(tools_result, "tools", tools_result)
+                tools_description, tool_schemas = _build_tools_description(tools)
+                system_prompt = SYSTEM_PROMPT.format(tools_description=tools_description)
+                logger.log(f"tools listed: {', '.join(getattr(tool, 'name', 'unknown') for tool in tools)}")
 
-            for iteration in range(1, max_iterations + 1):
-                history.append({"role": "user", "parts": [{"text": next_message}]})
-                logger.log(f"iteration={iteration} user_message={next_message}")
+                history: List[Dict[str, Any]] = []
+                next_message = query
 
-                try:
-                    response = genai_client.responses.create(
-                        model=model,
-                        contents=history,
-                        system_instruction=system_prompt,
-                        generation_config={"response_mime_type": "text/plain"},
-                    )
-                except TypeError:
-                    response = genai_client.responses.create(
-                        model=model,
-                        contents=history,
-                        system_instruction=system_prompt,
-                        config={"response_mime_type": "text/plain"},
-                    )
+                for iteration in range(1, max_iterations + 1):
+                    history.append({"role": "user", "parts": [{"text": next_message}]})
+                    logger.log(f"iteration={iteration} user_message={next_message}")
 
-                raw_text = _extract_response_text(response)
-                primary_line = raw_text.splitlines()[0] if raw_text else ""
-                history.append({"role": "model", "parts": [{"text": primary_line}]})
-                logger.log(f"model_response={primary_line}")
+                    response = _generate_model_response(genai_client, model, history, system_prompt)
 
-                try:
-                    directive = parse_agent_line(primary_line)
-                except ValueError as exc:
-                    feedback = f"Unrecognized response ({exc}). Please follow the protocol."
-                    next_message = feedback
-                    logger.log(f"protocol_error={exc}")
-                    continue
+                    raw_text = _extract_response_text(response)
+                    primary_line = raw_text.splitlines()[0] if raw_text else ""
+                    history.append({"role": "model", "parts": [{"text": primary_line}]})
+                    logger.log(f"model_response={primary_line}")
 
-                if directive.kind == "final_answer":
-                    logger.log("Agent signaled FINAL_ANSWER")
-                    break
-
-                tool_name = directive.name or ""
-                raw_args = directive.arguments or []
-                schema = tool_schemas.get(tool_name, [])
-                if len(raw_args) != len(schema):
-                    # Fall back to treating all args as strings if schema mismatched
-                    logger.log(
-                        f"argument_mismatch tool={tool_name} expected={len(schema)} received={len(raw_args)}"
-                    )
-                arguments: Dict[str, Any] = {}
-                for idx, raw_arg in enumerate(raw_args):
-                    if idx < len(schema):
-                        key, expected_type = schema[idx]
-                    else:
-                        key, expected_type = f"arg{idx}", "string"
                     try:
-                        arguments[key] = _convert_argument(raw_arg, expected_type)
+                        directive = parse_agent_line(primary_line)
                     except ValueError as exc:
-                        logger.log(f"argument_parse_error tool={tool_name} arg={key} value={raw_arg} error={exc}")
-                        arguments[key] = raw_arg
+                        feedback = f"Unrecognized response ({exc}). Please follow the protocol."
+                        next_message = feedback
+                        logger.log(f"protocol_error={exc}")
+                        continue
 
-                logger.log(f"FUNCTION_CALL parsed: {tool_name}|{'|'.join(raw_args)}")
+                    if directive.kind == "final_answer":
+                        logger.log("Agent signaled FINAL_ANSWER")
+                        break
 
-                if not hasattr(session, "call_tool"):
-                    raise RuntimeError("MCP session does not support call_tool")
+                    tool_name = directive.name or ""
+                    raw_args = directive.arguments or []
+                    schema = tool_schemas.get(tool_name, [])
+                    if len(raw_args) != len(schema):
+                        # Fall back to treating all args as strings if schema mismatched
+                        logger.log(
+                            f"argument_mismatch tool={tool_name} expected={len(schema)} received={len(raw_args)}"
+                        )
+                    arguments: Dict[str, Any] = {}
+                    for idx, raw_arg in enumerate(raw_args):
+                        if idx < len(schema):
+                            key, expected_type = schema[idx]
+                        else:
+                            key, expected_type = f"arg{idx}", "string"
+                        try:
+                            arguments[key] = _convert_argument(raw_arg, expected_type)
+                        except ValueError as exc:
+                            logger.log(
+                                f"argument_parse_error tool={tool_name} arg={key} value={raw_arg} error={exc}"
+                            )
+                            arguments[key] = raw_arg
 
-                tool_result = await _call_tool(session, tool_name, arguments)
-                logger.log(f"tool_result name={tool_name} output={tool_result}")
+                    logger.log(f"FUNCTION_CALL parsed: {tool_name}|{'|'.join(raw_args)}")
 
-                next_message = f"TOOL_RESULT {tool_name}: {tool_result}"
+                    if not hasattr(session, "call_tool"):
+                        raise RuntimeError("MCP session does not support call_tool")
 
-            else:
-                logger.log("Max iterations reached without FINAL_ANSWER")
+                    tool_result = await _call_tool(session, tool_name, arguments)
+                    logger.log(f"tool_result name={tool_name} output={tool_result}")
+
+                    next_message = f"TOOL_RESULT {tool_name}: {tool_result}"
+
+                else:
+                    logger.log("Max iterations reached without FINAL_ANSWER")
     finally:
         logger.close()
 
