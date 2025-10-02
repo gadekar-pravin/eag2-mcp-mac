@@ -161,11 +161,11 @@ The helper script `scripts/send_email_via_mcp.py` is available for quick manual 
 
 ```mermaid
 flowchart LR
-    Logs[logs/agent.log] --> Builder[email_payload.py]
-    Builder --> Context[ScenarioContext (gmail)]
-    Context --> send_email
-    send_email --> GmailAPI[Gmail API]
-    GmailAPI --> Recipient[Recipient Inbox]
+    Logs["logs/agent.log"] --> Builder["email_payload.py"]
+    Builder --> Context["ScenarioContext (gmail)"]
+    Context --> Sender["send_email tool"]
+    Sender --> GmailAPI["Gmail API"]
+    GmailAPI --> Recipient["Recipient inbox"]
 ```
 
 Ensure you have `gmail_credentials.json` (OAuth desktop client) and run the flow once to create `gmail_token.json`. The first invocation will open a browser window for OAuth consent.
