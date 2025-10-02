@@ -94,9 +94,17 @@ def _serialize_for_logging(payload: Any) -> str:
 class RunLogger:
     """Simple logger that writes structured lines to stdout and agent.log."""
 
+    _log_file_reset = False
+
     def __init__(self, run_id: str) -> None:
         _ensure_logs_dir()
         self.run_id = run_id
+        if not RunLogger._log_file_reset:
+            try:
+                LOG_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            RunLogger._log_file_reset = True
         self._file_handle = open(LOG_FILE, "a", encoding="utf-8")
 
     def close(self) -> None:
